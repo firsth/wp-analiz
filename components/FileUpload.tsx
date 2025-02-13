@@ -16,26 +16,103 @@ export default function FileUpload({ onDataProcessed }: FileUploadProps) {
     return `${day.padStart(2, '0')}.${month.padStart(2, '0')}.${fullYear}`;
   };
 
+  const cleanText = (text: string) => {
+    // Özel boşluk karakterlerini ve diğer gizli karakterleri temizle
+    return text.replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+  };
+
+  const standardizePhoneNumber = (text: string) => {
+    // Telefon numarası formatını kontrol et
+    const phoneMatch = text.match(/(?:\+)?(\d{2,3})\s*(\d{3})\s*(\d{3})\s*(\d{2})\s*(\d{2})/);
+    if (phoneMatch) {
+      // Numarayı standart formata dönüştür: +90 5XX XXX XX XX
+      const [, countryCode, part1, part2, part3, part4] = phoneMatch;
+      return `+${countryCode} ${part1} ${part2} ${part3} ${part4}`;
+    }
+    return text;
+  };
+
+  const standardizeName = (name: string) => {
+    const cleanName = cleanText(name);
+    return standardizePhoneNumber(cleanName);
+  };
+
   const processFile = async (file: File) => {
     const text = await file.text();
     const lines = text.split('\n');
     
     const messagePattern = /^\[?(\d{1,2}[/.]\d{1,2}[/.]\d{2,4})[,\s]+(\d{1,2}:\d{2}(?::\d{2})?)\]?\s-\s([^:]+):\s(.+)$/;
+    const systemMessagePattern = /^\[?(\d{1,2}[/.]\d{1,2}[/.]\d{2,4})[,\s]+(\d{1,2}:\d{2}(?::\d{2})?)\]?\s-\s(.+)$/;
+    
     const messages: any[] = [];
+    const groupMembers = new Set<string>();
+    const activeMembers = new Set<string>();
     
     lines.forEach(line => {
-      const match = line.match(messagePattern);
-      if (match) {
-        const [, date, time, sender, message] = match;
+      const cleanLine = cleanText(line);
+      
+      // Normal mesajları kontrol et
+      const messageMatch = cleanLine.match(messagePattern);
+      if (messageMatch) {
+        const [, date, time, sender, message] = messageMatch;
+        const standardSender = standardizeName(sender);
         messages.push({
           date: formatDate(date),
           time: time.trim(),
-          sender: sender.trim(),
+          sender: standardSender,
           message: message.trim()
         });
+        activeMembers.add(standardSender);
+        groupMembers.add(standardSender);
+        return;
+      }
+
+      // Sistem mesajlarını kontrol et
+      const systemMatch = cleanLine.match(systemMessagePattern);
+      if (systemMatch) {
+        const [, date, time, message] = systemMatch;
+        const cleanMessage = cleanText(message);
+        
+        // Gruba katılma mesajlarını kontrol et
+        const joinPatterns = [
+          /(.+) topluluk üzerinden katıldı/,
+          /(.+) gruba katıldı/,
+          /(.+) bu grubun davet bağlantısıyla katıldı/,
+          /Siz (.+) kişisini eklediniz/,
+          /(.+) kişisini eklediniz/,
+          /(.+) joined using this group's invite link/,
+          /(.+) joined the group/,
+          /You added (.+)/
+        ];
+
+        for (const pattern of joinPatterns) {
+          const joinMatch = cleanMessage.match(pattern);
+          if (joinMatch) {
+            const member = standardizeName(joinMatch[1]);
+            groupMembers.add(member);
+            break;
+          }
+        }
+
+        // Gruptan ayrılma mesajlarını kontrol et
+        const leavePatterns = [
+          /(.+) ayrıldı/,
+          /(.+) left/
+        ];
+
+        for (const pattern of leavePatterns) {
+          const leaveMatch = cleanMessage.match(pattern);
+          if (leaveMatch) {
+            const member = standardizeName(leaveMatch[1]);
+            groupMembers.delete(member);
+            activeMembers.delete(member);
+            break;
+          }
+        }
       }
     });
 
+    // İstatistikleri hesapla
     const stats = messages.reduce((acc: any, curr) => {
       const sender = curr.sender;
       if (!acc[sender]) {
@@ -51,7 +128,23 @@ export default function FileUpload({ onDataProcessed }: FileUploadProps) {
       return acc;
     }, {});
 
-    onDataProcessed(stats);
+    // Sessiz üyeleri ekle
+    const silentMembers = Array.from(groupMembers).filter(member => !activeMembers.has(member));
+    silentMembers.forEach(member => {
+      stats[member] = {
+        messageCount: 0,
+        messages: [],
+        dates: [],
+        isSilent: true
+      };
+    });
+
+    onDataProcessed({
+      stats,
+      totalMembers: groupMembers.size,
+      activeMembers: activeMembers.size,
+      silentMembers: silentMembers.length
+    });
   };
 
   const handleDragOver = (e: React.DragEvent) => {
